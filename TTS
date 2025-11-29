@@ -51,6 +51,9 @@ import pandas as pd
 from gtts import gTTS
 from pydub import AudioSegment
 
+# Speech speed control:
+# Set SPEECH_SPEED to 1.0 for normal speed, <1.0 to slow down (e.g. 0.9 = ~10% slower), >1.0 to speed up.
+SPEECH_SPEED = 0.80  # tweak this to slow down/speed up the speech (set to 0.8 as requested)
 LANG = 'en'
 OUTPUT_DIR = '/content/tts_output'
 ZIP_BASE = '/content/audio'  # will produce /content/audio.zip
@@ -61,6 +64,23 @@ def sanitize_filename(s: str) -> str:
 	s = re.sub(r'[\\/:"*?<>|]+', '_', s)
 	s = s.strip()
 	return s or 'output'
+
+def change_speed(sound: AudioSegment, speed: float) -> AudioSegment:
+	"""
+	Change playback speed of a pydub AudioSegment.
+	- speed = 1.0: unchanged
+	- speed < 1.0: slower
+	- speed > 1.0: faster
+
+	Implementation uses frame_rate manipulation and then resets frame_rate to preserve compatibility.
+	"""
+	if speed == 1.0:
+		return sound
+	# Alter the frame rate, then reset to original frame rate
+	new_frame_rate = int(sound.frame_rate * speed)
+	altered = sound._spawn(sound.raw_data, overrides={"frame_rate": new_frame_rate})
+	# set_frame_rate back to original to keep sample rate standard (helps avoid compatibility issues)
+	return altered.set_frame_rate(sound.frame_rate)
 
 
 print('Please upload your Excel file (xlsx/xls) using the file chooser dialog.')
@@ -97,9 +117,14 @@ for idx, row in df.iterrows():
 		tts.write_to_fp(mp3_fp)
 		mp3_fp.seek(0)
 		audio = AudioSegment.from_file(mp3_fp, format='mp3')
+
+		# Apply speed change if requested
+		if SPEECH_SPEED != 1.0:
+			audio = change_speed(audio, SPEECH_SPEED)
+
 		out_path = os.path.join(OUTPUT_DIR, f"{filename_base}.wav")
 		audio.export(out_path, format='wav')
-		print('Saved:', out_path)
+		print('Saved:', out_path, f'(speed={SPEECH_SPEED})' if SPEECH_SPEED != 1.0 else '')
 	except Exception as e:
 		print(f'Error on row {idx} (file={filename_base}):', e)
 
@@ -165,4 +190,3 @@ try:
 	colab_files.download(zip_path)
 except Exception:
 	print("If automatic download did not start, use the Files pane on the left to download 'audio.zip'.")
-
