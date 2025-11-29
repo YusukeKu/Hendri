@@ -1,0 +1,168 @@
+"""
+Colab-ready Text to Speech script
+
+How to use:
+ - Upload this file to Google Colab and run it, or paste the cell contents into a Colab code cell.
+ - It installs required packages (ffmpeg, gTTS, pandas, openpyxl, pydub), asks you to upload an Excel file,
+   converts Column B to English speech and names each WAV from Column A, then creates `/content/audio.zip`.
+ - A download button and/or automatic download will be attempted.
+
+Expectations:
+ - Excel: Column A = filename base, Column B = text to synthesize
+ - Header row is expected (use header=None in the code below if you have no header)
+
+Notes:
+ - This file is designed specifically for Google Colab. Running it locally is not necessary.
+"""
+
+import os
+import re
+import io
+import shutil
+import subprocess
+import sys
+
+# Ensure we're in Colab
+try:
+	from google.colab import files as colab_files
+	from IPython.display import HTML, display
+except Exception:
+	print('ERROR: This script is intended to run in Google Colab.')
+	raise SystemExit(1)
+
+# Install system and Python packages (best-effort). Running these in Colab is safe.
+def install_dependencies():
+	try:
+		subprocess.run(['apt-get', 'update', '-qq'], check=True)
+		subprocess.run(['apt-get', 'install', '-y', '-qq', 'ffmpeg'], check=True)
+	except Exception:
+		print('Warning: apt-get install may have failed or be unnecessary.')
+
+	try:
+		subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'gTTS', 'pandas', 'openpyxl', 'pydub'], check=True)
+	except Exception:
+		print('Warning: pip install attempt failed or partial; imports below will reveal missing packages.')
+
+
+install_dependencies()
+
+# Imports after install
+import pandas as pd
+from gtts import gTTS
+from pydub import AudioSegment
+
+LANG = 'en'
+OUTPUT_DIR = '/content/tts_output'
+ZIP_BASE = '/content/audio'  # will produce /content/audio.zip
+
+
+def sanitize_filename(s: str) -> str:
+	s = str(s)
+	s = re.sub(r'[\\/:"*?<>|]+', '_', s)
+	s = s.strip()
+	return s or 'output'
+
+
+print('Please upload your Excel file (xlsx/xls) using the file chooser dialog.')
+uploaded = colab_files.upload()
+if not uploaded:
+	print('No file uploaded. Exiting.')
+	raise SystemExit(1)
+
+excel_fname = list(uploaded.keys())[0]
+print('Uploaded:', excel_fname)
+
+# Read Excel (header row expected). If your sheet has no header, set header=None here.
+try:
+	df = pd.read_excel(excel_fname, header=0, engine='openpyxl')
+except Exception as e:
+	print('ERROR: failed to read Excel file:', e)
+	raise SystemExit(2)
+
+# Prepare output directory
+if os.path.exists(OUTPUT_DIR):
+	shutil.rmtree(OUTPUT_DIR)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Iterate rows: Column A -> filename base, Column B -> text
+for idx, row in df.iterrows():
+	filename_base = sanitize_filename(row.iloc[0]) if len(row) > 0 else f'row_{idx}'
+	text = row.iloc[1] if len(row) > 1 else ''
+	if pd.isna(text) or str(text).strip() == '':
+		print(f'Skipping row {idx} (empty text).')
+		continue
+	try:
+		tts = gTTS(text=str(text), lang=LANG)
+		mp3_fp = io.BytesIO()
+		tts.write_to_fp(mp3_fp)
+		mp3_fp.seek(0)
+		audio = AudioSegment.from_file(mp3_fp, format='mp3')
+		out_path = os.path.join(OUTPUT_DIR, f"{filename_base}.wav")
+		audio.export(out_path, format='wav')
+		print('Saved:', out_path)
+	except Exception as e:
+		print(f'Error on row {idx} (file={filename_base}):', e)
+
+# Create ZIP
+try:
+	shutil.make_archive(ZIP_BASE, 'zip', OUTPUT_DIR)
+	zip_path = ZIP_BASE + '.zip'
+	print('Created:', zip_path)
+except Exception as e:
+	print('ERROR creating zip:', e)
+	raise SystemExit(3)
+
+# Prepare web-accessible links (Colab serves /content as /files)
+web_zip_link = zip_path.replace('/content', '/files', 1)
+
+# Build per-file download links for WAVs
+wav_files = []
+for root, _, files_list in os.walk(OUTPUT_DIR):
+	for fname in sorted(files_list):
+		if fname.lower().endswith('.wav'):
+			full_path = os.path.join(root, fname)
+			web_path = full_path.replace('/content', '/files', 1)
+			wav_files.append((fname, web_path))
+
+# Display ZIP download button and per-WAV download buttons
+html_parts = []
+# A robust ZIP download button: tries to download via /files link, but uses fetch+blob to force download
+download_button_html = (
+	f'<div style="margin:8px 0">'
+	f'<a id="download-zip" href="{web_zip_link}" target="_blank">'
+	f'<button style="font-size:16px;padding:8px 12px">Download audio.zip</button>'
+	f'</a></div>'
+	f"<script>\n"
+	f"(function(){{\n"
+	f"  const btn = document.getElementById('download-zip');\n"
+	f"  btn.addEventListener('click', function(e){{\n"
+	f"    // Try to fetch and force-download the ZIP to avoid navigation issues\n"
+	f"    e.preventDefault();\n"
+	f"    fetch('{web_zip_link}').then(r=>{{ if(!r.ok) throw new Error('Network response not ok'); return r.blob(); }}).then(b=>{{\n"
+	f"      const u = URL.createObjectURL(b); const a = document.createElement('a'); a.href = u; a.download = 'audio.zip'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(u);\n"
+	f"    }}).catch(()=>{{ // fallback to direct link navigation\n"
+	f"      window.open('{web_zip_link}', '_blank');\n"
+	f"    }});\n"
+	f"  }});\n"
+	f"}})();\n"
+	f"</script>"
+)
+
+html_parts.append(download_button_html)
+html_parts.append('<div style="margin-top:10px"><strong>Individual WAV files</strong></div>')
+html_parts.append('<ul>')
+for fname, link in wav_files:
+	html_parts.append(f'<li style="margin:6px 0">{fname} — <a href="{link}" download><button style="padding:6px 8px">Download</button></a></li>')
+html_parts.append('</ul>')
+
+try:
+	display(HTML(''.join(html_parts)))
+except Exception:
+	pass
+
+# Also attempt programmatic download of the ZIP as a fallback
+try:
+	colab_files.download(zip_path)
+except Exception:
+	print("If automatic download did not start, use the Files pane on the left to download 'audio.zip'.")
+
